@@ -1,0 +1,9 @@
+! Shared shower/hadronisation settings for the JetClass Pythia-shower editions.
+Print:quiet = on
+Next:numberShowEvent = 0
+Next:numberShowInfo = 0
+Next:numberShowProcess = 0
+Beams:setProductionScalesFromLHEF = off
+Check:epTolErr = 1e-2
+PartonLevel:MPI = on
+HadronLevel:all = on

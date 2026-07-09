@@ -1,0 +1,36 @@
+# JetClass-SHERPA: HToWW4Q (boosted H -> WW -> 4q)  [FIXED decay forcing]
+# The off-shell Higgs cannot decay via the 2-body 25,24,-24 channel (m_H < 2 m_W) -> Sherpa
+# silently drops it and falls back to the default h decay. Force the *existing* 3-body
+# h -> W(on-shell) + qq' (off-shell W hadronic) channels, then force the on-shell W -> qq'.
+# Full event generation: ME (Comix) + hard decays + PS + hadronization + UE -> HepMC3. 13 TeV.
+BEAMS: 2212
+BEAM_ENERGIES: 6500
+EVENTS: 1000
+ME_GENERATORS: [Comix]
+PDF_LIBRARY: LHAPDFSherpa
+PDF_SET: NNPDF23_lo_as_0130_qed
+MPI_PDF_LIBRARY: LHAPDFSherpa
+MPI_PDF_SET: NNPDF23_lo_as_0130_qed
+EVENT_OUTPUT: HepMC3_GenEvent[events]
+PARTICLE_DATA: {25: {Mass: 125.0, Width: 0}, 6: {Width: 0}}
+HARD_DECAYS:
+  Enabled: true
+  Use_HO_SM_Widths: false
+  Apply_Branching_Ratios: false
+  Channels:
+    # h -> W(on-shell) + q q' (the other W is off-shell -> hadronic)
+    25,-24,2,-1: {Status: 2}
+    25,-24,4,-3: {Status: 2}
+    25,24,-2,1: {Status: 2}
+    25,24,-4,3: {Status: 2}
+    # on-shell W -> q q'  (=> 4 quarks total)
+    24,2,-1: {Status: 2}
+    24,4,-3: {Status: 2}
+    -24,-2,1: {Status: 2}
+    -24,-4,3: {Status: 2}
+PROCESSES:
+- 93 93 -> 12 -12 25:
+    Order: {QCD: 0, EW: 3}
+SELECTORS:
+- [PT, 25, 450.0, E_CMS]
+- [Eta, 25, -2.5, 2.5]

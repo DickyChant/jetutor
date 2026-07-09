@@ -1,0 +1,19 @@
+# JetClass-SHERPA: ZJetsToNuNu = q/g jets (Z->vv + jet, MET>450)
+# Full event generation: ME (Comix) + hard decays + parton shower + hadronization
+# + underlying event -> HepMC3.  PDF nn23lo1 (validated vs MadGraph).  13 TeV.
+BEAMS: 2212
+BEAM_ENERGIES: 6500
+EVENTS: 1000
+ME_GENERATORS: [Comix]
+PDF_LIBRARY: LHAPDFSherpa
+PDF_SET: NNPDF23_lo_as_0130_qed
+MPI_PDF_LIBRARY: LHAPDFSherpa
+MPI_PDF_SET: NNPDF23_lo_as_0130_qed
+EVENT_OUTPUT: HepMC3_GenEvent[events]
+PARTICLE_DATA: {6: {Width: 0}}
+ALPHAS: {USE_PDF: 1}
+PROCESSES:
+- 93 93 -> 12 -12 93:
+    Order: {QCD: 1, EW: 2}
+SELECTORS:
+- [PT, 93, 450.0, E_CMS]

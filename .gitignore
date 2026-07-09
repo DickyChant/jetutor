@@ -1,0 +1,32 @@
+# Code + configs only — never track datasets, envs, or run output.
+**/conda_sherpa_delphes_env/
+**/.conda_build_env/
+**/output/
+**/data/
+**/data_*/
+**/logs/
+**/.work/
+**/.cache/
+**/._dbindex_/
+**/smoke_out/
+
+# generated ntuplizer / driver binaries
+**/*_C.so
+**/*_C.d
+**/*_C*.pcm
+**/*.so
+pythia_showers/shower_lhe
+
+# transient generator output
+**/*.hepmc
+**/*.hepmc3
+**/*.lhe
+**/*.lhe.gz
+sherpa/generation/*/events
+sherpa/generation/*/Process/
+sherpa/generation/*/Results*/
+sherpa/generation/*/*.log
+
+# slides build artifacts (CI renders these)
+docs/slides/_site/
+docs/slides/*.pdf

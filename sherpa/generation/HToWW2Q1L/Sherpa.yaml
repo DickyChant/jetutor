@@ -1,0 +1,45 @@
+# JetClass-SHERPA: HToWW2Q1L  [UNIFIED natural-W config — supersedes the exclusive forcing]
+#
+# History: the previous exclusive forcing (Sherpa.yaml.broken2) pinned the HADRONIC quark pair
+# to the OFF-SHELL W* (~45 GeV) every event, so the semileptonic soft-drop mass peaked ~25 GeV
+# too low (the escaping neutrino means the jet mass tracks only the hadronic W). Sherpa's
+# sequential HARD_DECAYS cannot correlate "which Higgs 3-body channel" with "which on-shell-W
+# decay", so a single exclusive runcard can only ever make ONE (the light) configuration.
+#
+# Fix: force ONLY h->WW* (all eight 3-body channels, BR-weighted) and let each W decay
+# NATURALLY (67% qq / 33% lnu). This reproduces the true off-shell phase space — the hadronic
+# pair comes from the on-shell OR off-shell W in its physical ratio. The hqu ntuplizer
+# gen-matches each jet (gen_match 45=H_ww4q, 46=H_ww2q1l), so the rebin keeps gen_match==46 for
+# this class (the 4q byproduct is harvestable for HToWW4Q). Validated: 2Q1L m_SD peak 64.6->97.9
+# (Pythia 97.9). 13 TeV; boosted via H recoiling against an invisible Z->nunu.
+BEAMS: 2212
+BEAM_ENERGIES: 6500
+EVENTS: 1000
+ME_GENERATORS: [Comix]
+PDF_LIBRARY: LHAPDFSherpa
+PDF_SET: NNPDF23_lo_as_0130_qed
+MPI_PDF_LIBRARY: LHAPDFSherpa
+MPI_PDF_SET: NNPDF23_lo_as_0130_qed
+EVENT_OUTPUT: HepMC3_GenEvent[events]
+PARTICLE_DATA: {25: {Mass: 125.0, Width: 0}, 6: {Width: 0}}
+HARD_DECAYS:
+  Enabled: true
+  Use_HO_SM_Widths: false
+  Apply_Branching_Ratios: true       # keep the physical hadronic:leptonic off-shell ratio
+  Channels:
+    # h -> W(on-shell) + off-shell W* products (hadronic AND leptonic, both charges)
+    25,-24,2,-1: {Status: 2}
+    25,-24,4,-3: {Status: 2}
+    25,-24,12,-11: {Status: 2}
+    25,-24,14,-13: {Status: 2}
+    25,24,-2,1: {Status: 2}
+    25,24,-4,3: {Status: 2}
+    25,24,-12,11: {Status: 2}
+    25,24,-14,13: {Status: 2}
+    # on-shell W: NOT listed -> decays with its natural SM branching ratios
+PROCESSES:
+- 93 93 -> 12 -12 25:
+    Order: {QCD: 0, EW: 3}
+SELECTORS:
+- [PT, 25, 450.0, E_CMS]
+- [Eta, 25, -2.5, 2.5]

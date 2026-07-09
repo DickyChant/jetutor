@@ -1,0 +1,67 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/prefix-dev/recipe-format/main/schema.json
+context:
+  name: sherpa3
+  version: "3.0.4"
+
+package:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  url: https://gitlab.com/sherpa-team/sherpa/-/archive/v${{ version }}/sherpa-v${{ version }}.tar.gz
+  sha256: a9ddc4ee35087c5a669cf6fae151ea72bcc6882270aa7e7c7a37f9574ceea197
+
+build:
+  number: 0
+  # CMake build; POSIX only for now.
+  skip: win
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+    - ${{ compiler('cxx') }}
+    - ${{ compiler('fortran') }}
+    - cmake
+    - ninja
+    - pkg-config
+    - swig                       # generates the Python (pysherpa) bindings
+  host:
+    - lhapdf
+    - libzip
+    - hepmc3
+    - rivet            # pulls yoda transitively
+    - pythia8
+    - openloops
+    - openmpi
+    - python
+  run:
+    - python
+    - rivet            # the SherpaRivetAnalysis plugin links libRivet
+
+tests:
+  - script:
+      - test -x ${PREFIX}/bin/Sherpa
+      - Sherpa --version
+      - python -c "import Sherpa"
+
+about:
+  homepage: https://sherpa-team.gitlab.io/
+  repository: https://gitlab.com/sherpa-team/sherpa
+  license: GPL-3.0-or-later
+  license_file: COPYING
+  summary: "Sherpa: a Monte Carlo event generator for high-energy particle collisions"
+  description: |
+    Sherpa (Simulation of High-Energy Reactions of Particles) is a Monte Carlo
+    event generator for the simulation of high-energy collisions in lepton-lepton,
+    lepton-hadron and hadron-hadron experiments. It provides multi-leg tree-level
+    matrix elements, CKKW(-L) multijet merging, NLO QCD/EW corrections (via the
+    OpenLoops one-loop provider), parton showers, hadronization and the underlying
+    event.
+
+    Packaged as `sherpa3` because the conda-forge name `sherpa` is already taken
+    by the unrelated X-ray-astronomy package of the same name. This build enables
+    the LHAPDF, HepMC3, Rivet, Pythia8, OpenLoops and Python (pysherpa) interfaces.
+
+extra:
+  recipe-maintainers:
+    - DickyChant

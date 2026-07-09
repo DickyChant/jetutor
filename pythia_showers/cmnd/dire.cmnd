@@ -1,0 +1,9 @@
+! JetClass-DIRE: Pythia 8.3 DIRE dipole shower
+Print:quiet = on
+Next:numberShowEvent = 0
+Next:numberShowInfo = 0
+Next:numberShowProcess = 0
+Check:epTolErr = 1e-2
+PartonLevel:MPI = on
+HadronLevel:all = on
+PartonShowers:model = 3

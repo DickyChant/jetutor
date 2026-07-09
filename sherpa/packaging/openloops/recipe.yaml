@@ -1,0 +1,60 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/prefix-dev/recipe-format/main/schema.json
+context:
+  name: openloops
+  version: "2.1.5"
+
+package:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  url: https://gitlab.com/openloops/OpenLoops/-/archive/OpenLoops-${{ version }}/OpenLoops-OpenLoops-${{ version }}.tar.gz
+  sha256: dbb2bdf160725dca4e80d85403ce6d1f55a15754ba863fcc62febc42efc34bc2
+
+build:
+  number: 0
+  # SCons-based build; POSIX only.
+  skip: win
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+    - ${{ compiler('cxx') }}
+    - ${{ compiler('fortran') }}
+    - python                       # drives the bundled SCons
+  host:
+    - python
+  run:
+    - python                       # needed by the `openloops` driver / libinstall
+  run_exports:
+    # libopenloops has no stable ABI promise across minor versions
+    - ${{ pin_subpackage('openloops', upper_bound='x.x') }}
+
+tests:
+  - script:
+      - ls -l ${PREFIX}/lib/libopenloops.so
+      - test -f ${PREFIX}/include/openloops.h
+      - test -f ${PREFIX}/share/openloops/proclib/channels_public.rinfo
+      - openloops --version
+
+about:
+  homepage: https://openloops.hepforge.org/
+  repository: https://gitlab.com/openloops/OpenLoops
+  license: GPL-3.0-or-later
+  license_file: COPYING
+  summary: A fast one-loop matrix-element generator for the Standard Model
+  description: |
+    OpenLoops is a Fortran 90 package for the fast numerical evaluation of
+    tree and one-loop scattering matrix elements for Standard Model processes.
+    It is widely used as a virtual matrix-element provider for Monte Carlo
+    event generators such as Sherpa.
+
+    This package ships the process-independent OpenLoops engine (including the
+    bundled Collier, CutTools and OneLOop one-loop libraries) plus the
+    `openloops` command-line driver. Process libraries are NOT bundled; install
+    them at runtime with `openloops libinstall <process>` (this downloads and
+    compiles the process source, and therefore needs a Fortran compiler).
+
+extra:
+  recipe-maintainers:
+    - DickyChant
