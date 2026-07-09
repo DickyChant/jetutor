@@ -1,6 +1,6 @@
 name: slides
-# Render the comparison deck (Typst) and publish it to GitHub Pages.
-# Enable once in the repo: Settings -> Pages -> Source = "GitHub Actions".
+# Render the comparison deck (Typst) to crisp SVG slides + PDF and publish a web slide viewer
+# to GitHub Pages. Enable once: Settings -> Pages -> Source = "GitHub Actions".
 on:
   push:
     branches: [main]
@@ -30,27 +30,17 @@ jobs:
 
       - uses: typst-community/setup-typst@v4
 
-      - name: Render deck -> PDF + per-slide PNGs
+      - name: Render deck -> SVG slides + PDF
         working-directory: docs/slides
         run: |
-          mkdir -p _site
-          typst compile jetclass_editions.typ _site/jetclass_editions.pdf
-          typst compile jetclass_editions.typ '_site/slide-{0p}.png' --ppi 150
-
-      - name: Build landing page
-        working-directory: docs/slides
-        run: |
-          cd _site
-          {
-            echo '<!doctype html><meta charset=utf-8><title>JetClass editions — comparison</title>'
-            echo '<style>body{font-family:system-ui,sans-serif;margin:0;background:#f5f5f7;color:#1a1a1a}'
-            echo 'header{padding:18px 24px;background:#0b3d91;color:#fff}header a{color:#cfe0ff}'
-            echo 'main{max-width:1100px;margin:0 auto;padding:20px}img{width:100%;margin:14px 0;'
-            echo 'box-shadow:0 1px 6px rgba(0,0,0,.15);border-radius:4px}</style>'
-            echo '<header><b>jetutor</b> — JetClass generator editions · <a href="jetclass_editions.pdf">download PDF</a></header><main>'
-            for f in $(ls slide-*.png | sort); do echo "<img src=\"$f\">"; done
-            echo '</main>'
-          } > index.html
+          rm -rf _site && mkdir -p _site
+          # crisp vector slides, one SVG per page (zero-padded index)
+          typst compile jetclass_editions.typ '_site/slide-{0p}.svg'
+          typst compile jetclass_editions.typ '_site/jetclass_editions.pdf'
+          cp web/index.html _site/index.html
+          # manifest = ordered list of slide SVGs, for the viewer to load
+          (cd _site && ls slide-*.svg | sort | sed 's/.*/"&"/' | paste -sd, - | sed 's/^/[/;s/$/]/' > manifest.json)
+          echo "rendered $(ls _site/slide-*.svg | wc -l) slides"
 
       - uses: actions/upload-pages-artifact@v3
         with:

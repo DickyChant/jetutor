@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>jetutor — JetClass editions</title>
+<style>
+  :root { --accent:#4d8dff; --bg0:#0b0f1a; --bg1:#11182b; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html,body { height:100%; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: radial-gradient(120% 120% at 50% 0%, var(--bg1), var(--bg0));
+    color:#e8ecf4; overflow:hidden; -webkit-font-smoothing:antialiased;
+  }
+  /* top bar */
+  header {
+    position:fixed; top:0; left:0; right:0; z-index:20;
+    display:flex; align-items:center; gap:14px;
+    padding:10px 16px; font-size:14px;
+    background:linear-gradient(#0b0f1aee,#0b0f1a00);
+    transition:opacity .3s; opacity:.85;
+  }
+  header .brand { font-weight:700; letter-spacing:.02em; }
+  header .brand span { color:var(--accent); }
+  header .spacer { flex:1; }
+  header a, header button {
+    color:#cfe0ff; background:#ffffff14; border:1px solid #ffffff22;
+    border-radius:7px; padding:5px 11px; font-size:13px; cursor:pointer;
+    text-decoration:none; transition:background .15s;
+  }
+  header a:hover, header button:hover { background:#ffffff26; }
+  /* stage */
+  #stage { position:absolute; inset:0; display:grid; place-items:center; padding:56px 64px; }
+  #slide {
+    max-width:min(94vw, calc(94vh * 1.777)); max-height:88vh; width:auto;
+    border-radius:8px; box-shadow:0 24px 70px #000a, 0 2px 0 #ffffff10;
+    background:#fff; transition:opacity .18s ease; user-select:none;
+  }
+  #slide.fade { opacity:0; }
+  /* click/nav zones */
+  .zone { position:fixed; top:0; bottom:0; width:22%; z-index:10; cursor:pointer; }
+  .zone.l { left:0; } .zone.r { right:0; }
+  .arrow {
+    position:fixed; top:50%; transform:translateY(-50%); z-index:15;
+    width:44px; height:44px; border-radius:50%; display:grid; place-items:center;
+    background:#ffffff12; border:1px solid #ffffff22; color:#dfe8ff; font-size:20px;
+    opacity:0; transition:opacity .2s, background .15s; cursor:pointer;
+  }
+  .arrow:hover { background:#ffffff26; }
+  body:hover .arrow { opacity:.7; }
+  .arrow.l { left:18px; } .arrow.r { right:18px; }
+  /* footer: progress + counter */
+  footer { position:fixed; left:0; right:0; bottom:0; z-index:20; }
+  #bar { height:3px; background:var(--accent); width:0; transition:width .25s ease; }
+  #count {
+    position:fixed; bottom:12px; right:16px; z-index:20;
+    font-variant-numeric:tabular-nums; font-size:13px; color:#aeb9d0;
+    background:#0b0f1a99; padding:3px 9px; border-radius:6px;
+  }
+  #hint {
+    position:fixed; bottom:12px; left:16px; z-index:20; font-size:12px; color:#7f8aa3;
+  }
+  #err { position:fixed; inset:0; display:none; place-items:center; text-align:center; color:#aeb9d0; }
+</style>
+</head>
+<body>
+  <header id="bar-top">
+    <div class="brand"><span>jet</span>utor · JetClass editions</div>
+    <div class="spacer"></div>
+    <a id="pdf" href="jetclass_editions.pdf">PDF</a>
+    <button id="fs" title="Fullscreen (f)">⛶</button>
+  </header>
+
+  <div id="stage"><img id="slide" alt="slide"></div>
+
+  <div class="zone l" data-dir="-1"></div>
+  <div class="zone r" data-dir="1"></div>
+  <div class="arrow l" data-dir="-1">‹</div>
+  <div class="arrow r" data-dir="1">›</div>
+
+  <div id="err">Slides are still being rendered — check the <b>Actions</b> tab, then refresh.</div>
+  <footer><div id="bar"></div></footer>
+  <div id="count">– / –</div>
+  <div id="hint">← → · space · f fullscreen</div>
+
+<script>
+(async function () {
+  const img = document.getElementById('slide');
+  const bar = document.getElementById('bar');
+  const count = document.getElementById('count');
+  let slides = [], i = 0;
+
+  try {
+    slides = await (await fetch('manifest.json', {cache:'no-store'})).json();
+  } catch (e) {}
+  if (!slides.length) { document.getElementById('stage').style.display='none';
+    document.getElementById('err').style.display='grid'; return; }
+
+  const clamp = n => Math.max(0, Math.min(slides.length - 1, n));
+  function show(n) {
+    n = clamp(n); if (n === i && img.src) return;
+    i = n;
+    img.classList.add('fade');
+    const next = new Image();
+    next.onload = () => { img.src = next.src; img.classList.remove('fade'); };
+    next.src = slides[i];
+    count.textContent = (i + 1) + ' / ' + slides.length;
+    bar.style.width = ((i + 1) / slides.length * 100) + '%';
+    location.hash = (i + 1);
+  }
+  const go = d => show(i + d);
+
+  document.querySelectorAll('[data-dir]').forEach(el =>
+    el.addEventListener('click', () => go(+el.dataset.dir)));
+  document.getElementById('fs').addEventListener('click', () =>
+    document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen());
+  addEventListener('keydown', e => {
+    if (['ArrowRight','' ,'PageDown','ArrowDown'].includes(e.key)) { go(1); e.preventDefault(); }
+    else if (['ArrowLeft','PageUp','ArrowUp'].includes(e.key)) { go(-1); e.preventDefault(); }
+    else if (e.key === 'Home') show(0);
+    else if (e.key === 'End') show(slides.length - 1);
+    else if (e.key.toLowerCase() === 'f') document.getElementById('fs').click();
+  });
+  // touch swipe
+  let x0 = null;
+  addEventListener('touchstart', e => x0 = e.touches[0].clientX, {passive:true});
+  addEventListener('touchend', e => { if (x0 === null) return;
+    const dx = e.changedTouches[0].clientX - x0; if (Math.abs(dx) > 40) go(dx < 0 ? 1 : -1); x0 = null; });
+  // preload neighbours
+  const pre = n => { if (slides[n]) { const im = new Image(); im.src = slides[n]; } };
+  const _show = show; show = n => { _show(n); pre(i+1); pre(i-1); };
+
+  show(Math.max(0, (parseInt(location.hash.slice(1)) || 1) - 1));
+})();
+</script>
+</body>
+</html>
