@@ -104,13 +104,13 @@
     [*Sherpa* (ours)], [#text(fill: good)[done]], [125 M], [Sherpa 3 + OpenLoops (decay fixes, see next)],
     [*Herwig 7.3* (ours)], [#text(fill: good)[done]], [125 M], [MG5 + Herwig 7.3 angular-ordered],
     [Herwig (orig.)], [#text(fill: good)[ref]], [125 M], [MG5 + older Herwig (JetClass authors)],
-    [*Pythia+VINCIA* (ours)], [#text(fill: warn)[running]], [→125 M], [MG5 LHE + Pythia VINCIA antenna shower],
-    [*Pythia+DIRE* (ours)], [#text(fill: warn)[running]], [→125 M], [MG5 LHE + Pythia DIRE dipole shower],
+    [*Pythia+VINCIA* (ours)], [#text(fill: good)[done]], [125 M], [MG5 LHE + Pythia VINCIA antenna shower],
+    [*Pythia+DIRE* (ours)], [#text(fill: good)[done]], [125 M], [MG5 LHE + Pythia DIRE dipole shower],
   )
   #v(0.4em)
   Each: *10 classes × 12.5M jets*, batched SLURM arrays (transient HepMC on pscratch, cleaned per
   sub-batch). Pythia/Sherpa/Herwig integrity-*verified* (#text(fill: good)[ALL GOOD]): file/entry counts,
-  41 branches, one-hot labels & particle types. DIRE/VINCIA generating on `shared_overrun`.
+  41 branches, one-hot labels & particle types. All six editions now complete and verified.
 ])
 
 // ───────────────────────── SHERPA DECAY BUG ─────────────────────────
@@ -224,24 +224,33 @@
   #v(0.2em)
   #grid(columns: 2, gutter: 14pt,
     [
-      - *VINCIA* — antenna shower. Tracks the default Pythia shower closely (mean m#sub[SD] 45 vs 42,
-        nparts 34 vs 32). #text(fill: good)[Healthy.]
-      - *DIRE* — dipole shower (like Sherpa's CS). Gives *softer QCD jets* (nparts 24 vs 32) — a genuine
-        shower difference, *not* a bug.
+      - *VINCIA* — antenna shower. *Indistinguishable from Pythia* at jet level: per-class KS
+        *0.004–0.037*, every jet-level feature KS\<0.024.
+      - *DIRE* — dipole shower (like Sherpa's CS). Matches Pythia on *quark* jets (Higgs/W/Z ~0.01) but
+        *softer on gluon-rich jets* — a genuine shower difference, *not* a bug.
     ],
     [
-      - *Resonance gate (next):* on W/Z all three showers reproduce the mass peak (80 / 91) → DIRE is
-        sound, its QCD softness is physical.
-      - *Build gotcha:* Delphes silently drops Pythia's HepMC3 (0 events) → write *HepMC2*.
-      - Status: *generating* on `shared_overrun`; rebin → compare to follow.
+      *DIRE vs Pythia — where it splits (KS):*
+      #v(0.15em)
+      #table(columns: (1.4fr, auto, auto), inset: 4.5pt, stroke: 0.4pt + luma(220), align: (left, center, center),
+        table.header([class], [nparts], [m#sub[SD]]),
+        [ZJetsToNuNu (QCD)], [#text(fill: warn)[0.36]], [#text(fill: warn)[0.29]],
+        [TTBarLep], [#text(fill: warn)[0.32]], [0.03],
+        [TTBar], [0.16], [0.02],
+        [HToBB / WToQQ], [\<0.05], [\<0.01])
     ],
   )
+  #v(0.2em)
+  Both editions reproduce the W/Z/top/Higgs mass peaks exactly (see next); DIRE's difference lives
+  purely in *constituent multiplicity of gluon-radiation-rich jets*. Build gotcha: Delphes silently
+  drops Pythia's HepMC3 → write *HepMC2*.
 ])
 
-#plotslide("DIRE / VINCIA validation — resonance peaks agree", "figs/dire_vincia_resonance.png",
-  [WToQQ (left) and ZToQQ (right), Pythia-shower variants on identical MG5 events. All three showers —
-   simple (black), VINCIA (green), DIRE (blue) — peak at the W/Z mass (dashed). DIRE is sound on
-   resonances; its earlier low numbers were specific to gluon-dominated QCD jets.])
+#plotslide2("Shower isolation — agree on resonances, split on gluon jets",
+  "figs/shower_resonance.png", "figs/shower_qcd.png",
+  [Left: W/Z soft-drop mass — Pythia (black), VINCIA (green), DIRE (blue, dashed) all peak on the boson
+   mass. Right: constituent multiplicity for the gluon-rich classes — VINCIA sits on Pythia, while DIRE
+   peaks lower with a shorter tail (fewer particles). Same MG5 events + string hadronisation throughout.])
 
 // ───────────────────────── SYNTHESIS ─────────────────────────
 #slide("Where the editions agree — and where they split", [
@@ -272,7 +281,8 @@
 
       #v(0.3em)
       No single generator is an outlier — the family clusters tightly, with substructure the lone axis
-      of (small) disagreement. DIRE / VINCIA will extend this along the shower axis.
+      of (small) disagreement. The shower-only DIRE / VINCIA editions extend this along a clean shower
+      axis: VINCIA ≈ Pythia, DIRE splits only in gluon-jet multiplicity.
     ],
   )
 ])
@@ -316,15 +326,17 @@
     [
       *Model spread (mean per-class KS):*
       #v(0.3em)
-      #box(fill: luma(245), inset: 10pt, radius: 5pt)[
+      #box(fill: luma(245), inset: 9pt, radius: 5pt, text(size: 12.5pt)[
+        VINCIA ↔ Pythia: #text(fill: good, weight: "bold")[0.015]#h(0.6em)#text(size: 10.5pt, fill: gray)[shower-only] #linebreak()
         Herwig73 ↔ Pythia: #text(fill: good, weight: "bold")[0.023] #linebreak()
         Herwig73 ↔ origHerwig: #text(fill: good, weight: "bold")[0.025] #linebreak()
         Sherpa ↔ Pythia: #text(fill: good, weight: "bold")[0.034] #linebreak()
-        Herwig73 ↔ Sherpa: #text(fill: warn, weight: "bold")[0.043]
-      ]
+        Herwig73 ↔ Sherpa: #text(fill: warn, weight: "bold")[0.043] #linebreak()
+        DIRE ↔ Pythia: #text(fill: warn, weight: "bold")[0.052]#h(0.6em)#text(size: 10.5pt, fill: gray)[gluon jets] #linebreak()
+      ])
       #v(0.3em)
-      *Next:* finish DIRE / VINCIA → a 6-way shower / hadronisation matrix for robustness &
-      domain-adaptation studies in jet tagging.
+      *Delivered:* a *6-way* shower / hadronisation matrix — full-generator (Sherpa, Herwig) and
+      shower-only (VINCIA, DIRE) axes — for robustness & domain-adaptation studies in jet tagging.
     ],
   )
   #v(0.6em)
