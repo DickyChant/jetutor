@@ -10,6 +10,8 @@
 R__LOAD_LIBRARY(libDelphes)
 #include "classes/DelphesClasses.h"
 #include "ExRootAnalysis/ExRootTreeReader.h"
+#include <bitset>
+#include <limits>
 #else
 class ExRootTreeReader;
 #endif
@@ -697,26 +699,37 @@ private:
   EventType event_type_ = EventType::QCD;
 };
 
+// charged pion mass (PDG), the mass CMS particle flow assigns to charged hadrons
+constexpr double kChargedPionMass = 0.13957039;
+
 struct ParticleInfo {
+  // Uses the stored four-momentum, not GenParticle::Mass: Delphes' HepMC2 reader rescales the momentum of a file
+  // written in MeV to GeV but copies the mass field unscaled.
   ParticleInfo(const GenParticle *particle) {
     pt = particle->PT;
     eta = particle->Eta;
     phi = particle->Phi;
-    mass = particle->Mass;
-    p4 = ROOT::Math::PtEtaPhiMVector(pt, eta, phi, mass);
-    px = p4.px();
-    py = p4.py();
-    pz = p4.pz();
-    energy = p4.energy();
+    px = particle->Px;
+    py = particle->Py;
+    pz = particle->Pz;
+    energy = particle->E;
+    mass = particle->P4().M();
     charge = particle->Charge;
     pid = particle->PID;
   }
 
-  ParticleInfo(const ParticleFlowCandidate *particle) {
+  // With chargedHadronPionMass, a charged candidate that is not an electron or a muon gets the pion mass at fixed
+  // track momentum, as in CMS particle flow; Delphes gives it its true mass, which identifies kaons and protons.
+  // Neutral hadrons and photons are massless (energy = |p|) in both Delphes and CMS particle flow.
+  ParticleInfo(const ParticleFlowCandidate *particle, bool chargedHadronPionMass) {
     pt = particle->PT;
     eta = particle->Eta;
     phi = particle->Phi;
     mass = particle->Mass;
+    if (chargedHadronPionMass && particle->Charge != 0 && std::abs(particle->PID) != 11 &&
+        std::abs(particle->PID) != 13) {
+      mass = kChargedPionMass;
+    }
     p4 = ROOT::Math::PtEtaPhiMVector(pt, eta, phi, mass);
     px = p4.px();
     py = p4.py();
@@ -749,9 +762,872 @@ struct ParticleInfo {
   float dzerr = 0;
 };
 
+// Generator truth graph of one event, following the CMS MC-truth graph (cms-sw/cmssw PhysicsTools/TruthInfo, by
+// F. Pantaleo) on the GEN side:
+//   - per-particle reco::GenStatusFlags bits, ported from PhysicsTools/HepMCCandAlgos MCTruthHelper, so they read
+//     like NanoAOD GenPart_statusFlags;
+//   - three history modes:
+//       0: the full generator record;
+//       1: the CMS default for the main event (TruthLogicalGraphPostProcessor collapseIntermediateGenParticles): the
+//          parton shower is kept, and pure 1 -> 1 copy chains of the same species are merged into their last copy,
+//          which inherits the production vertex of the first;
+//       2: additionally the shower collapse CMS applies to pile-up (truth::collapseGenShower: keep status 1,
+//          isHardProcess, and the last copy of anything that is not a shower object; re-attach every survivor to its
+//          nearest surviving ancestors), with two additions: partons produced in a decayed hadron (e.g.
+//          Upsilon -> g g g) are kept, since they are physics, not shower, and so is the last copy of a top;
+//   - the GEN vertex reasons of truth::genVertexReason, with the truth::VertexReason numbering, stamped on the
+//     complete GEN topology before any collapse (as CMS does), and Unknown for the beam-side vertices (CMS models
+//     those as artificial vertices);
+//   - the truth levels of PhysicsTools/TruthInfo/interface/TruthLevels.h that exist without SIM, with the
+//     truth::LevelFlag bit values.
+//
+// Mother links: D1..D2 is a contiguous daughter range in the HepMC2, HepMC3 and Pythia8 Delphes readers, while M1..M2
+// is not always a range (HepMC: first/last incoming particle of the production vertex), so mothers are built by
+// inverting the daughter ranges, plus the M1/M2 endpoints themselves.
+//
+// Beyond Pythia (the CMS rules assume Pythia status codes):
+//   - a record that is not a DAG is made one: Sherpa lists the incoming hard-process partons among the outputs of its
+//     single shower vertex, whose inputs include the final-state partons. Inside each strongly connected component, the
+//     mother links that do not lead deeper from the beams (BFS depth) are dropped;
+//   - Herwig clusters (81) are treated like Pythia strings/clusters, and ThePEG remnants (82) like beam pseudoparticles;
+//   - a parton splitting into status-11 partons (the Herwig and Sherpa shower code) is ShowerBranching, and partons
+//     turning into a cluster or string are Hadronization. isHardProcess, and with it the HardProcess and PartonJets
+//     levels and the HardScatter reason, needs Pythia codes or the status 3 Sherpa gives its hard-process legs.
+class GenTruthGraph {
+public:
+  enum StatusBit {
+    kIsPrompt = 0,
+    kIsDecayedLeptonHadron,
+    kIsTauDecayProduct,
+    kIsPromptTauDecayProduct,
+    kIsDirectTauDecayProduct,
+    kIsDirectPromptTauDecayProduct,
+    kIsDirectHadronDecayProduct,
+    kIsHardProcess,
+    kFromHardProcess,
+    kIsHardProcessTauDecayProduct,
+    kIsDirectHardProcessTauDecayProduct,
+    kFromHardProcessBeforeFSR,
+    kIsFirstCopy,
+    kIsLastCopy,
+    kIsLastCopyBeforeFSR
+  };
+
+  enum LevelFlag : uint32_t {
+    HardProcess = 1u << 1,
+    StableDecayProducts = 1u << 2,
+    Signal = 1u << 4,
+    ReconstructableFromSignal = 1u << 5,
+    PartonJets = 1u << 7,
+    BHadrons = 1u << 8,
+    CHadrons = 1u << 9,
+    ReconstructableFinalState = 1u << 10,
+    TauVisibleHadronic = 1u << 11,
+    TauVisibleLeptonic = 1u << 12,
+  };
+
+  enum VertexReason : int { Unknown = 0, Decay = 2, HardScatter = 17, ShowerBranching = 18, Hadronization = 19 };
+
+  enum Mode { kFull = 0, kCollapseCopies = 1, kCollapseShower = 2 };
+
+  explicit GenTruthGraph(int mode = kCollapseCopies) : mode_(mode) {}
+
+  void build(const TClonesArray *branchParticle) {
+    n_ = branchParticle->GetEntriesFast();
+    particles_.resize(n_);
+    pid_.resize(n_);
+    status_.resize(n_);
+    index_.clear();
+    for (int i = 0; i < n_; ++i) {
+      particles_[i] = (const GenParticle *)branchParticle->At(i);
+      pid_[i] = particles_[i]->PID;
+      status_[i] = particles_[i]->Status;
+      index_[particles_[i]] = i;
+    }
+    buildLinks();
+    statusFlags_.assign(n_, 0);
+    for (int i = 0; i < n_; ++i) {
+      statusFlags_[i] = computeStatusFlags(i);
+    }
+    buildCollapsed();
+    buildVertices();
+    if (mode_ >= kCollapseCopies)
+      collapseCopyChains();
+    buildLevels();
+  }
+
+  // index of the particle in the Particle branch, -1 if not found
+  int index(const GenParticle *gp) const {
+    auto it = index_.find(gp);
+    return it == index_.end() ? -1 : it->second;
+  }
+
+  const GenParticle *particle(int i) const { return particles_[i]; }
+  bool kept(int i) const { return keep_[i]; }
+  uint16_t statusFlags(int i) const { return statusFlags_[i]; }
+  uint32_t levelFlags(int i) const { return levelFlags_[i]; }
+  int vertex(int i) const { return vertexOf_[i]; }
+  int vertexReason(int v) const { return v < 0 ? Unknown : vertexReason_[v]; }
+  // parents in the stored (collapsed or full) graph
+  const std::vector<int> &parents(int i) const { return parents_[i]; }
+  // generator records that were not DAGs so far, and the mother links dropped to make them one
+  long eventsWithCycles() const { return eventsWithCycles_; }
+  long droppedCycleLinks() const { return droppedCycleLinks_; }
+
+  // all stored ancestors of the seeds, including the seeds themselves, sorted by Particle-branch index
+  std::vector<int> ancestry(const std::vector<int> &seeds) const {
+    std::vector<char> visited(n_, 0);
+    std::vector<int> stack;
+    for (int i : seeds) {
+      if (i >= 0 && !visited[i]) {
+        visited[i] = 1;
+        stack.push_back(i);
+      }
+    }
+    while (!stack.empty()) {
+      int i = stack.back();
+      stack.pop_back();
+      for (int m : parents_[i]) {
+        if (!visited[m]) {
+          visited[m] = 1;
+          stack.push_back(m);
+        }
+      }
+    }
+    std::vector<int> result;
+    for (int i = 0; i < n_; ++i) {
+      if (visited[i])
+        result.push_back(i);
+    }
+    return result;
+  }
+
+  // Signal and ReconstructableFromSignal bits for one resonance (the one the jet was matched to): the Signal root is
+  // the most upstream stored copy of it, and the walk down from there is the TruthLevels reconstructable walk.
+  std::unordered_map<int, uint32_t> signalFlags(int resonance) const {
+    std::unordered_map<int, uint32_t> flags;
+    if (resonance < 0)
+      return flags;
+    int root = firstCopy(resonance);
+    while (root >= 0 && !keep_[root])
+      root = nextCopy(root);
+    if (root < 0)
+      return flags;
+    flags[root] |= Signal;
+    std::vector<int> legs = reconstructableLegsFrom({root});
+    dropCoveredMembers(legs, false);
+    for (int i : legs)
+      flags[i] |= ReconstructableFromSignal;
+    return flags;
+  }
+
+  static bool isParton(int pdgId) {
+    int a = std::abs(pdgId);
+    return (a >= 1 && a <= 6) || a == 21;
+  }
+
+  // Pythia strings/clusters (91-94) and Herwig clusters (81)
+  static bool isStringOrCluster(int pdgId) {
+    int a = std::abs(pdgId);
+    return a == 81 || (a >= 91 && a <= 94);
+  }
+
+  // TruthInfo isShowerObject: partons, diquarks, strings/clusters and generator pseudoparticles (plus the Herwig
+  // cluster 81 and the ThePEG remnant 82)
+  static bool isShowerObject(int pdgId) {
+    int a = std::abs(pdgId);
+    if (isParton(a))
+      return true;
+    if (isStringOrCluster(a) || a == 82)
+      return true;
+    if (a == 990)
+      return true;
+    if (a >= 1000 && a <= 9999 && (a / 10) % 10 == 0 && (a / 100) % 10 != 0)
+      return true;
+    return a >= 9900000 && a < 1000000000;
+  }
+
+  // HepPDT::ParticleID::isHadron on the PDG numbering digits (mesons and baryons)
+  static bool isHadron(int pdgId) {
+    int a = std::abs(pdgId);
+    if (a < 100 || a >= 1000000000 || (a >= 9900000))
+      return false;
+    int nq1 = (a / 1000) % 10, nq2 = (a / 100) % 10, nq3 = (a / 10) % 10;
+    if (nq3 == 0 || nq2 == 0)
+      return false;  // diquarks and non-hadron codes
+    return true;
+  }
+
+  static bool hadronHasQuark(int pdgId, int flavor) {
+    int a = std::abs(pdgId);
+    if (a < 100 || a >= 1000000000)
+      return false;
+    if (a >= 1000 && a <= 9999 && (a / 10) % 10 == 0 && (a / 100) % 10 != 0)
+      return false;
+    return (a / 1000) % 10 == flavor || (a / 100) % 10 == flavor || (a / 10) % 10 == flavor;
+  }
+
+private:
+  void addMother(int dau, int mom) {
+    if (dau < 0 || mom < 0 || dau >= n_ || mom >= n_ || dau == mom)
+      return;
+    auto &v = mothers_[dau];
+    if (std::find(v.begin(), v.end(), mom) == v.end())
+      v.push_back(mom);
+  }
+
+  void buildLinks() {
+    mothers_.assign(n_, {});
+    for (int i = 0; i < n_; ++i) {
+      const auto *gp = particles_[i];
+      addMother(i, gp->M1);
+      addMother(i, gp->M2);
+    }
+    for (int i = 0; i < n_; ++i) {
+      const auto *gp = particles_[i];
+      if (gp->D1 < 0)
+        continue;
+      if (gp->D2 > gp->D1) {
+        for (int d = gp->D1; d <= gp->D2; ++d)
+          addMother(d, i);
+      } else {
+        // D2 < D1: two separate daughters (Pythia8 convention)
+        addMother(gp->D1, i);
+        addMother(gp->D2, i);
+      }
+    }
+    breakCycles();
+    daughters_.assign(n_, {});
+    for (int i = 0; i < n_; ++i) {
+      for (int m : mothers_[i])
+        daughters_[m].push_back(i);
+    }
+  }
+
+  // Drop the mother links that close a cycle: inside a strongly connected component (Tarjan), a link from a mother that
+  // is not strictly shallower than its daughter, in BFS depth from the particles without mothers. Every remaining link
+  // inside a component goes strictly deeper and links between components follow their DAG, so the result is acyclic.
+  // A DAG is left untouched.
+  void breakCycles() {
+    std::vector<std::vector<int>> dau(n_);
+    for (int i = 0; i < n_; ++i) {
+      for (int m : mothers_[i])
+        dau[m].push_back(i);
+    }
+
+    std::vector<int> comp(n_, -1), low(n_, 0), order(n_, -1), stack;
+    std::vector<char> onStack(n_, 0);
+    std::vector<std::pair<int, size_t>> calls;
+    int counter = 0, ncomp = 0;
+    bool anyCycle = false;
+    for (int s = 0; s < n_; ++s) {
+      if (order[s] >= 0)
+        continue;
+      order[s] = low[s] = counter++;
+      stack.push_back(s);
+      onStack[s] = 1;
+      calls.emplace_back(s, 0);
+      while (!calls.empty()) {
+        const int v = calls.back().first;
+        if (calls.back().second < dau[v].size()) {
+          const int w = dau[v][calls.back().second++];
+          if (order[w] < 0) {
+            order[w] = low[w] = counter++;
+            stack.push_back(w);
+            onStack[w] = 1;
+            calls.emplace_back(w, 0);
+          } else if (onStack[w]) {
+            low[v] = std::min(low[v], order[w]);
+          }
+          continue;
+        }
+        if (low[v] == order[v]) {
+          int w = -1, size = 0;
+          do {
+            w = stack.back();
+            stack.pop_back();
+            onStack[w] = 0;
+            comp[w] = ncomp;
+            ++size;
+          } while (w != v);
+          anyCycle |= size > 1;
+          ++ncomp;
+        }
+        calls.pop_back();
+        if (!calls.empty())
+          low[calls.back().first] = std::min(low[calls.back().first], low[v]);
+      }
+    }
+    if (!anyCycle)
+      return;
+
+    std::vector<int> depth(n_, std::numeric_limits<int>::max()), queue;
+    for (int i = 0; i < n_; ++i) {
+      if (mothers_[i].empty()) {
+        depth[i] = 0;
+        queue.push_back(i);
+      }
+    }
+    for (size_t q = 0; q < queue.size(); ++q) {
+      for (int d : dau[queue[q]]) {
+        if (depth[d] == std::numeric_limits<int>::max()) {
+          depth[d] = depth[queue[q]] + 1;
+          queue.push_back(d);
+        }
+      }
+    }
+    for (int i = 0; i < n_; ++i) {
+      auto &v = mothers_[i];
+      const size_t before = v.size();
+      v.erase(std::remove_if(v.begin(),
+                             v.end(),
+                             [&](int m) { return comp[m] == comp[i] && depth[m] >= depth[i]; }),
+              v.end());
+      droppedCycleLinks_ += before - v.size();
+    }
+    ++eventsWithCycles_;
+  }
+
+  // ---- MCTruthHelper port (indices instead of pointers, -1 for none) ----
+  int mother(int p) const { return mothers_[p].empty() ? -1 : mothers_[p][0]; }
+
+  int previousCopy(int p) const {
+    for (int m : mothers_[p]) {
+      if (pid_[m] == pid_[p])
+        return m;
+    }
+    return -1;
+  }
+
+  int nextCopy(int p) const {
+    for (int d : daughters_[p]) {
+      if (pid_[d] == pid_[p])
+        return d;
+    }
+    return -1;
+  }
+
+  int firstCopy(int p) const {
+    std::unordered_set<int> seen;
+    while (previousCopy(p) >= 0) {
+      seen.insert(p);
+      p = previousCopy(p);
+      if (seen.count(p))
+        return -1;
+    }
+    return p;
+  }
+
+  int lastCopy(int p) const {
+    std::unordered_set<int> seen;
+    while (nextCopy(p) >= 0) {
+      seen.insert(p);
+      p = nextCopy(p);
+      if (seen.count(p))
+        return -1;
+    }
+    return p;
+  }
+
+  int uniqueMother(int p) const {
+    int mo = p;
+    std::unordered_set<int> seen;
+    while (mo >= 0 && pid_[mo] == pid_[p]) {
+      seen.insert(mo);
+      mo = mother(mo);
+      if (seen.count(mo))
+        return -1;
+    }
+    return mo;
+  }
+
+  int lastDaughterCopyBeforeFSR(int p) const {
+    int pcopy = p;
+    std::unordered_set<int> seen;
+    bool hasDaughterCopy = true;
+    while (hasDaughterCopy) {
+      seen.insert(pcopy);
+      hasDaughterCopy = false;
+      for (int d : daughters_[pcopy]) {
+        if (pid_[d] == 21 || pid_[d] == 22)
+          return pcopy;
+      }
+      for (int d : daughters_[pcopy]) {
+        if (pid_[d] == pid_[p]) {
+          pcopy = d;
+          hasDaughterCopy = true;
+          break;
+        }
+      }
+      if (hasDaughterCopy && seen.count(pcopy))
+        return -1;
+    }
+    return pcopy;
+  }
+
+  int lastCopyBeforeFSR(int p) const {
+    int first = firstCopy(p);
+    return first < 0 ? -1 : lastDaughterCopyBeforeFSR(first);
+  }
+
+  bool isLastCopy(int p) const { return lastCopy(p) == p; }
+
+  bool isDecayedLeptonHadron(int p) const {
+    int a = std::abs(pid_[p]);
+    return status_[p] == 2 && (isHadron(pid_[p]) || a == 13 || a == 15) && isLastCopy(p);
+  }
+
+  int findDecayedMother(int p, int abspdgid = 0) const {
+    int mo = mother(p);
+    std::unordered_set<int> seen;
+    while (mo >= 0 && ((abspdgid && std::abs(pid_[mo]) != abspdgid) || !isDecayedLeptonHadron(mo))) {
+      seen.insert(mo);
+      mo = mother(mo);
+      if (seen.count(mo))
+        return -1;
+    }
+    return mo;
+  }
+
+  bool isPrompt(int p) const { return findDecayedMother(p) < 0; }
+
+  bool isHardProcess(int p) const {
+    if (status_[p] == 3)
+      return true;
+    if (status_[p] > 20 && status_[p] < 30)
+      return true;
+    if (status_[p] == 1 || status_[p] == 2) {
+      int um = mother(p);
+      if (um >= 0) {
+        int fc = firstCopy(um);
+        bool fromResonance = fc >= 0 && status_[fc] == 22;
+        int umNext = nextCopy(um);
+        bool fsrBranching = umNext >= 0 && status_[umNext] > 50 && status_[umNext] < 60;
+        if (fromResonance && !fsrBranching)
+          return true;
+      }
+    }
+    return false;
+  }
+
+  int hardProcessMotherCopy(int p) const {
+    if (isHardProcess(p))
+      return p;
+    int pcopy = p;
+    std::unordered_set<int> seen;
+    while (previousCopy(pcopy) >= 0) {
+      seen.insert(pcopy);
+      pcopy = previousCopy(pcopy);
+      if (isHardProcess(pcopy))
+        return pcopy;
+      if (seen.count(pcopy))
+        break;
+    }
+    return -1;
+  }
+
+  bool fromHardProcess(int p) const { return hardProcessMotherCopy(p) >= 0; }
+
+  bool fromHardProcessBeforeFSR(int p) const {
+    if (status_[p] == 3)
+      return true;
+    int hpc = hardProcessMotherCopy(p);
+    if (hpc < 0)
+      return false;
+    if (status_[hpc] == 21 && p == hpc)
+      return true;
+    if (status_[hpc] == 22 && isLastCopy(p))
+      return true;
+    if ((status_[hpc] == 23 || status_[hpc] == 1) && p == lastDaughterCopyBeforeFSR(hpc))
+      return true;
+    return false;
+  }
+
+  uint16_t computeStatusFlags(int p) const {
+    const int tau = findDecayedMother(p, 15);
+    const int dm = findDecayedMother(p);
+    const int um = uniqueMother(p);
+    std::bitset<15> f;
+    f[kIsPrompt] = dm < 0;
+    f[kIsDecayedLeptonHadron] = isDecayedLeptonHadron(p);
+    f[kIsTauDecayProduct] = tau >= 0;
+    f[kIsPromptTauDecayProduct] = tau >= 0 && isPrompt(tau);
+    f[kIsDirectTauDecayProduct] = tau >= 0 && tau == dm;
+    f[kIsDirectPromptTauDecayProduct] = tau >= 0 && tau == dm && isPrompt(tau);
+    f[kIsDirectHadronDecayProduct] = um >= 0 && isHadron(pid_[um]) && isDecayedLeptonHadron(um);
+    f[kIsHardProcess] = isHardProcess(p);
+    f[kFromHardProcess] = fromHardProcess(p);
+    f[kIsHardProcessTauDecayProduct] = tau >= 0 && isDecayedLeptonHadron(tau) && fromHardProcess(tau);
+    f[kIsDirectHardProcessTauDecayProduct] = tau >= 0 && tau == dm && fromHardProcess(tau);
+    f[kFromHardProcessBeforeFSR] = fromHardProcessBeforeFSR(p);
+    f[kIsFirstCopy] = firstCopy(p) == p;
+    f[kIsLastCopy] = isLastCopy(p);
+    f[kIsLastCopyBeforeFSR] = lastCopyBeforeFSR(p) == p;
+    return static_cast<uint16_t>(f.to_ulong());
+  }
+
+  // ---- collapse (truth::collapseGenShower) ----
+  bool keepParticle(int p) const {
+    if (mode_ < kCollapseShower)
+      return true;
+    if (status_[p] == 1)
+      return true;
+    if (statusFlags_[p] & (1u << kIsHardProcess))
+      return true;
+    // the top decays before it can hadronize, so its last copy is kept like any other resonance (CMS keeps it only
+    // through isHardProcess, which generators without Pythia status codes, e.g. Herwig, never set)
+    if ((statusFlags_[p] & (1u << kIsLastCopy)) && (!isShowerObject(pid_[p]) || std::abs(pid_[p]) == 6))
+      return true;
+    // addition to the CMS rule: partons from a hadron decay, e.g. Upsilon -> g g g (the beam protons are not decays)
+    if (isParton(pid_[p])) {
+      for (int m : mothers_[p]) {
+        if (isHadron(pid_[m]) && status_[m] == 2)
+          return true;
+      }
+    }
+    return false;
+  }
+
+  static void sortUnique(std::vector<int> &v) {
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+  }
+
+  void buildCollapsed() {
+    keep_.assign(n_, 0);
+    for (int i = 0; i < n_; ++i)
+      keep_[i] = keepParticle(i);
+
+    // nearest kept ancestors-or-self of every particle; iterative and memoized, cycle-safe
+    std::vector<std::vector<int>> nearestKept(n_);
+    std::vector<char> state(n_, 0);  // 0 = new, 1 = in progress, 2 = done
+    std::vector<int> stack;
+    for (int seed = 0; seed < n_; ++seed) {
+      if (state[seed] == 2)
+        continue;
+      stack.push_back(seed);
+      while (!stack.empty()) {
+        int i = stack.back();
+        if (state[i] == 2) {
+          stack.pop_back();
+          continue;
+        }
+        if (state[i] == 0) {
+          state[i] = 1;
+          if (keep_[i]) {
+            nearestKept[i].push_back(i);
+            state[i] = 2;
+            stack.pop_back();
+            continue;
+          }
+          for (int m : mothers_[i]) {
+            if (state[m] == 0)
+              stack.push_back(m);
+          }
+          continue;
+        }
+        for (int m : mothers_[i]) {
+          if (state[m] == 2)
+            nearestKept[i].insert(nearestKept[i].end(), nearestKept[m].begin(), nearestKept[m].end());
+        }
+        sortUnique(nearestKept[i]);
+        state[i] = 2;
+        stack.pop_back();
+      }
+    }
+
+    parents_.assign(n_, {});
+    children_.assign(n_, {});
+    for (int i = 0; i < n_; ++i) {
+      if (!keep_[i])
+        continue;
+      for (int m : mothers_[i]) {
+        for (int a : nearestKept[m]) {
+          // a particle produced at the same vertex must not become an ancestor
+          if (a != i && mothers_[a] != mothers_[i])
+            parents_[i].push_back(a);
+        }
+      }
+      sortUnique(parents_[i]);
+      for (int a : parents_[i])
+        children_[a].push_back(i);
+    }
+  }
+
+  // ---- copy chains (collapseIntermediateGenParticleChains) ----
+  // A stored particle that is not stable, has exactly one stored child, of the same species, which in turn has no
+  // other parent, is a 1 -> 1 copy step. Each chain is replaced by its last copy, which takes the production vertex
+  // of the first. Unlike CMS, the merged particle also takes the union of the chain's status flags: otherwise a
+  // hard-process quark whose only later step is a recoil copy loses isHardProcess and drops out of the HardProcess
+  // and PartonJets levels.
+  void collapseCopyChains() {
+    std::vector<int> directChild(n_, -1);
+    for (int p = 0; p < n_; ++p) {
+      if (!keep_[p] || status_[p] == 1 || children_[p].size() != 1)
+        continue;
+      int c = children_[p][0];
+      if (pid_[c] == pid_[p] && parents_[c].size() == 1)
+        directChild[p] = c;
+    }
+    std::vector<int> rep(n_, -1);
+    for (int p = 0; p < n_; ++p) {
+      if (!keep_[p] || rep[p] >= 0)
+        continue;
+      std::vector<int> path;
+      int cur = p;
+      while (rep[cur] < 0 && directChild[cur] >= 0 && path.size() < static_cast<size_t>(n_)) {
+        path.push_back(cur);
+        cur = directChild[cur];
+      }
+      int r = rep[cur] >= 0 ? rep[cur] : cur;
+      rep[cur] = r;
+      for (int x : path)
+        rep[x] = r;
+    }
+
+    std::vector<std::vector<int>> parents(n_), children(n_);
+    std::vector<int> head(n_, -1);
+    for (int y = 0; y < n_; ++y) {
+      if (!keep_[y])
+        continue;
+      bool isHead = true;
+      for (int m : parents_[y]) {
+        if (rep[m] == rep[y]) {
+          isHead = false;
+        } else {
+          parents[rep[y]].push_back(rep[m]);
+        }
+      }
+      if (isHead)
+        head[rep[y]] = y;
+    }
+    for (int y = 0; y < n_; ++y) {
+      if (!keep_[y])
+        continue;
+      if (rep[y] != y) {
+        statusFlags_[rep[y]] |= statusFlags_[y];
+        keep_[y] = 0;
+        continue;
+      }
+      sortUnique(parents[y]);
+      for (int m : parents[y])
+        children[m].push_back(y);
+      if (head[y] >= 0)
+        vertexOf_[y] = vertexOf_[head[y]];
+    }
+    parents_ = std::move(parents);
+    children_ = std::move(children);
+    for (auto &c : children_)
+      sortUnique(c);
+  }
+
+  // ---- vertices and their reasons (truth::genVertexReason) ----
+  void buildVertices() {
+    // a production vertex is the set of incoming particles in the full record
+    std::map<std::vector<int>, int> vertexIds;
+    vertexOf_.assign(n_, -1);
+    std::vector<std::vector<int>> outgoing;
+    std::vector<std::vector<int>> incoming;
+    for (int i = 0; i < n_; ++i) {
+      if (mothers_[i].empty())
+        continue;
+      std::vector<int> key = mothers_[i];
+      std::sort(key.begin(), key.end());
+      auto it = vertexIds.find(key);
+      if (it == vertexIds.end()) {
+        it = vertexIds.emplace(key, outgoing.size()).first;
+        outgoing.emplace_back();
+        incoming.push_back(key);
+      }
+      vertexOf_[i] = it->second;
+      outgoing[it->second].push_back(i);
+    }
+
+    auto hadronizes = [](int pdgId) { return isShowerObject(pdgId) && std::abs(pdgId) != 6; };
+    vertexReason_.assign(outgoing.size(), Unknown);
+    for (size_t v = 0; v < outgoing.size(); ++v) {
+      const auto &in = incoming[v];
+      const auto &out = outgoing[v];
+      if (in.empty() || out.empty())
+        continue;
+      if (std::any_of(in.begin(), in.end(), [&](int i) { return status_[i] == 4; }))
+        continue;  // beam side
+      auto anyOutgoingStatus = [&](int low, int high) {
+        return std::any_of(out.begin(), out.end(), [&](int i) { return status_[i] >= low && status_[i] <= high; });
+      };
+      const bool fromShower = std::all_of(in.begin(), in.end(), [&](int i) { return hadronizes(pid_[i]); });
+      if (in.size() >= 2) {
+        bool flagged = std::all_of(
+            in.begin(), in.end(), [&](int i) { return (statusFlags_[i] & (1u << kIsHardProcess)) != 0; });
+        bool coded = std::all_of(in.begin(), in.end(), [&](int i) { return status_[i] == 21; });
+        if (flagged || coded) {
+          vertexReason_[v] = HardScatter;
+          continue;
+        }
+      }
+      if (fromShower && anyOutgoingStatus(41, 59)) {
+        vertexReason_[v] = ShowerBranching;
+        continue;
+      }
+      // the same without Pythia shower codes: Herwig and Sherpa give shower partons status 11
+      if (fromShower &&
+          std::all_of(out.begin(), out.end(), [&](int i) { return isParton(pid_[i]) && status_[i] == 11; })) {
+        vertexReason_[v] = ShowerBranching;
+        continue;
+      }
+      const bool fromString = std::any_of(in.begin(), in.end(), [&](int i) { return isStringOrCluster(pid_[i]); });
+      const bool toHadron = std::any_of(out.begin(), out.end(), [&](int i) { return !isShowerObject(pid_[i]); });
+      const bool toString = std::any_of(out.begin(), out.end(), [&](int i) { return isStringOrCluster(pid_[i]); });
+      if (fromString || (fromShower && (toHadron || toString || anyOutgoingStatus(71, 79)))) {
+        vertexReason_[v] = Hadronization;
+        continue;
+      }
+      if (in.size() == 1 && !hadronizes(pid_[in[0]]))
+        vertexReason_[v] = Decay;
+    }
+  }
+
+  // ---- truth levels (TruthLevels.h), on the stored graph ----
+  void dropCoveredMembers(std::vector<int> &members, bool keepDeepest) const {
+    std::vector<char> covered(n_, 0);
+    std::vector<int> stack;
+    auto pushNeighbours = [&](int id) {
+      for (int nb : keepDeepest ? parents_[id] : children_[id]) {
+        if (nb != id && !covered[nb]) {
+          covered[nb] = 1;
+          stack.push_back(nb);
+        }
+      }
+    };
+    for (int id : members)
+      pushNeighbours(id);
+    while (!stack.empty()) {
+      int id = stack.back();
+      stack.pop_back();
+      pushNeighbours(id);
+    }
+    members.erase(std::remove_if(members.begin(), members.end(), [&](int id) { return covered[id] != 0; }),
+                  members.end());
+  }
+
+  // walk down from the seeds, stopping at a pi0 (the default reconstructablePdgIds), a generator-stable particle, or
+  // a particle with nothing below it; neutrinos are dropped
+  std::vector<int> reconstructableLegsFrom(const std::vector<int> &seeds) const {
+    std::vector<int> legs;
+    std::vector<char> seen(n_, 0);
+    std::vector<int> stack;
+    for (int s : seeds) {
+      seen[s] = 1;
+      stack.push_back(s);
+    }
+    while (!stack.empty()) {
+      int p = stack.back();
+      stack.pop_back();
+      if (pid_[p] == 111 || status_[p] == 1 || children_[p].empty()) {
+        int a = std::abs(pid_[p]);
+        if (a != 12 && a != 14 && a != 16)
+          legs.push_back(p);
+        continue;
+      }
+      for (int c : children_[p]) {
+        if (!seen[c]) {
+          seen[c] = 1;
+          stack.push_back(c);
+        }
+      }
+    }
+    std::sort(legs.begin(), legs.end());
+    return legs;
+  }
+
+  void buildLevels() {
+    levelFlags_.assign(n_, 0);
+    auto stamp = [&](const std::vector<int> &members, uint32_t bit) {
+      for (int i : members)
+        levelFlags_[i] |= bit;
+    };
+    auto candidates = [&](auto pred) {
+      std::vector<int> c;
+      for (int i = 0; i < n_; ++i) {
+        if (keep_[i] && pred(i))
+          c.push_back(i);
+      }
+      return c;
+    };
+
+    auto hard = candidates([&](int i) { return (statusFlags_[i] & (1u << kIsHardProcess)) != 0; });
+    dropCoveredMembers(hard, true);
+    stamp(hard, HardProcess);
+    std::vector<int> partonJets;
+    for (int i : hard) {
+      if (isParton(pid_[i]))
+        partonJets.push_back(i);
+    }
+    stamp(partonJets, PartonJets);
+
+    stamp(candidates([&](int i) { return status_[i] == 1; }), StableDecayProducts);
+
+    auto bhad = candidates([&](int i) { return hadronHasQuark(pid_[i], 5); });
+    dropCoveredMembers(bhad, true);
+    stamp(bhad, BHadrons);
+    auto chad = candidates([&](int i) { return hadronHasQuark(pid_[i], 4); });
+    dropCoveredMembers(chad, true);
+    stamp(chad, CHadrons);
+
+    // the last tau of each radiative chain with a recorded decay, split by whether an electron or a muon is among
+    // the decay products
+    auto tauDecay = [&](int i) {
+      if (std::abs(pid_[i]) != 15 || children_[i].empty())
+        return 0;
+      bool leptonic = false;
+      for (int c : children_[i]) {
+        int a = std::abs(pid_[c]);
+        if (a == 15)
+          return 0;
+        if (a == 11 || a == 13)
+          leptonic = true;
+      }
+      return leptonic ? 2 : 1;
+    };
+    auto tauHad = candidates([&](int i) { return tauDecay(i) == 1; });
+    dropCoveredMembers(tauHad, false);
+    stamp(tauHad, TauVisibleHadronic);
+    auto tauLep = candidates([&](int i) { return tauDecay(i) == 2; });
+    dropCoveredMembers(tauLep, false);
+    stamp(tauLep, TauVisibleLeptonic);
+
+    auto roots = candidates([&](int i) { return parents_[i].empty(); });
+    auto finalState = reconstructableLegsFrom(roots);
+    dropCoveredMembers(finalState, false);
+    stamp(finalState, ReconstructableFinalState);
+  }
+
+  int mode_;
+  int n_ = 0;
+  std::vector<const GenParticle *> particles_;
+  std::vector<int> pid_;
+  std::vector<int> status_;
+  std::unordered_map<const GenParticle *, int> index_;
+  std::vector<std::vector<int>> mothers_;    // full record
+  std::vector<std::vector<int>> daughters_;  // full record
+  std::vector<uint16_t> statusFlags_;
+  std::vector<char> keep_;
+  std::vector<std::vector<int>> parents_;   // stored graph
+  std::vector<std::vector<int>> children_;  // stored graph
+  std::vector<int> vertexOf_;
+  std::vector<int> vertexReason_;
+  std::vector<uint32_t> levelFlags_;
+  long eventsWithCycles_ = 0;
+  long droppedCycleLinks_ = 0;
+};
+
 //------------------------------------------------------------------------------
 
-void makeNtuples(TString inputFile, TString outputFile, TString jetBranch = "FatJet") {
+void makeNtuples(TString inputFile,
+                 TString outputFile,
+                 TString jetBranch = "FatJet",
+                 int genHistoryMode = GenTruthGraph::kCollapseCopies,
+                 bool chargedHadronPionMass = true) {
   gSystem->Load("libDelphes");
 
   TFile *fout = new TFile(outputFile, "RECREATE");
@@ -778,6 +1654,21 @@ void makeNtuples(TString inputFile, TString outputFile, TString jetBranch = "Fat
   floatVars["jet_tau3"] = 0;
   floatVars["jet_tau4"] = 0;
 
+  // gen-level truth: GenFatJet (anti-kt R=0.8 on stable gen particles w/o neutrinos) matched to the reco jet
+  floatVars["genjet_matched"] = 0;
+  floatVars["genjet_dr"] = 0;
+  floatVars["genjet_pt"] = 0;
+  floatVars["genjet_eta"] = 0;
+  floatVars["genjet_phi"] = 0;
+  floatVars["genjet_energy"] = 0;
+  floatVars["genjet_nparticles"] = 0;
+  floatVars["genjet_sdmass"] = 0;
+  floatVars["genjet_tau1"] = 0;
+  floatVars["genjet_tau2"] = 0;
+  floatVars["genjet_tau3"] = 0;
+  floatVars["genjet_tau4"] = 0;
+  floatVars["genjet_nhist"] = 0;
+
   std::map<TString, std::vector<float>> arrayVars;
   arrayVars["part_px"];
   arrayVars["part_py"];
@@ -793,12 +1684,49 @@ void makeNtuples(TString inputFile, TString outputFile, TString jetBranch = "Fat
   arrayVars["part_dzval"];
   arrayVars["part_dzerr"];
 
+  // constituents of the matched GenFatJet; deta/dphi are w.r.t. the reco jet axis (same frame as part_*)
+  arrayVars["genjet_part_px"];
+  arrayVars["genjet_part_py"];
+  arrayVars["genjet_part_pz"];
+  arrayVars["genjet_part_energy"];
+  arrayVars["genjet_part_pt"];
+  arrayVars["genjet_part_deta"];
+  arrayVars["genjet_part_dphi"];
+  arrayVars["genjet_part_charge"];
+  arrayVars["genjet_part_pid"];
+
+  // generator history of the matched GenFatJet (see GenTruthGraph): every constituent plus all its ancestors in the
+  // CMS-style truth graph (genHistoryMode: 0 full record, 1 copy chains merged, 2 shower collapsed), ordered as in
+  // the Particle branch. The graph is stored as mother->daughter edges between local indices into the genjet_hist_* arrays.
+  arrayVars["genjet_hist_pt"];
+  arrayVars["genjet_hist_eta"];
+  arrayVars["genjet_hist_phi"];
+  arrayVars["genjet_hist_mass"];
+  arrayVars["genjet_hist_energy"];
+
+  std::map<TString, std::vector<int>> intArrayVars;
+  intArrayVars["genjet_hist_pid"];
+  intArrayVars["genjet_hist_status"];
+  intArrayVars["genjet_hist_charge"];
+  intArrayVars["genjet_hist_index"];         // index in the Delphes Particle branch
+  intArrayVars["genjet_hist_statusflags"];   // reco::GenStatusFlags bits, as NanoAOD GenPart_statusFlags
+  intArrayVars["genjet_hist_levelflags"];    // truth::LevelFlag bits; Signal bits refer to this jet's resonance
+  intArrayVars["genjet_hist_vtx"];           // local production-vertex index (shared by siblings), -1 for none
+  intArrayVars["genjet_hist_vtxreason"];     // truth::VertexReason of the production vertex
+  intArrayVars["genjet_hist_edge_mother"];   // local index of the mother
+  intArrayVars["genjet_hist_edge_daughter"]; // local index of the daughter
+  intArrayVars["genjet_part_histidx"];       // local genjet_hist_* index of each genjet_part_* entry
+
   // book
   for (auto &v : floatVars) {
     tree->Branch(v.first.Data(), &v.second);
   }
 
   for (auto &v : arrayVars) {
+    tree->Branch(v.first.Data(), &v.second, /*bufsize=*/1024000);
+  }
+
+  for (auto &v : intArrayVars) {
     tree->Branch(v.first.Data(), &v.second, /*bufsize=*/1024000);
   }
 
@@ -816,8 +1744,11 @@ void makeNtuples(TString inputFile, TString outputFile, TString jetBranch = "Fat
   TClonesArray *branchParticle = treeReader->UseBranch("Particle");
   TClonesArray *branchPFCand = treeReader->UseBranch("ParticleFlowCandidate");
   TClonesArray *branchJet = treeReader->UseBranch(jetBranch);
+  TClonesArray *branchGenJet = treeReader->UseBranch("GenFatJet");
+  const double genJetMatchDR = 0.4;
 
   FatJetMatching fjmatch(0.8);
+  GenTruthGraph genGraph(genHistoryMode);
 
   // Loop over all events
   int num_processed = 0;
@@ -828,6 +1759,7 @@ void makeNtuples(TString inputFile, TString outputFile, TString jetBranch = "Fat
 
     // Load selected branches with data from specified event
     treeReader->ReadEntry(entry);
+    genGraph.build(branchParticle);
 
     // Loop over all jets in event
     for (Int_t i = 0; i < branchJet->GetEntriesFast(); ++i) {
@@ -840,6 +1772,9 @@ void makeNtuples(TString inputFile, TString outputFile, TString jetBranch = "Fat
         v.second = 0;
       }
       for (auto &v : arrayVars) {
+        v.second.clear();
+      }
+      for (auto &v : intArrayVars) {
         v.second.clear();
       }
 
@@ -902,7 +1837,7 @@ void makeNtuples(TString inputFile, TString outputFile, TString jetBranch = "Fat
         if (object->IsA() == GenParticle::Class()) {
           particles.emplace_back((GenParticle *)object);
         } else if (object->IsA() == ParticleFlowCandidate::Class()) {
-          particles.emplace_back((ParticleFlowCandidate *)object);
+          particles.emplace_back((ParticleFlowCandidate *)object, chargedHadronPionMass);
         }
         const auto &p = particles.back();
         if (std::abs(p.pz) > 10000 || std::abs(p.eta) > 5 || p.pt <= 0) {
@@ -929,6 +1864,116 @@ void makeNtuples(TString inputFile, TString outputFile, TString jetBranch = "Fat
         arrayVars["part_dzerr"].push_back(p.dzerr);
       }
 
+      // match to the closest GenFatJet within genJetMatchDR
+      const Jet *genjet = nullptr;
+      double genjet_dr = genJetMatchDR;
+      for (Int_t k = 0; k < branchGenJet->GetEntriesFast(); ++k) {
+        const Jet *gj = (Jet *)branchGenJet->At(k);
+        double dr = deltaR(jet, gj);
+        if (dr < genjet_dr) {
+          genjet_dr = dr;
+          genjet = gj;
+        }
+      }
+
+      floatVars["genjet_dr"] = -1;
+      if (genjet) {
+        floatVars["genjet_matched"] = 1;
+        floatVars["genjet_dr"] = genjet_dr;
+        floatVars["genjet_pt"] = genjet->PT;
+        floatVars["genjet_eta"] = genjet->Eta;
+        floatVars["genjet_phi"] = genjet->Phi;
+        floatVars["genjet_energy"] = genjet->P4().Energy();
+        floatVars["genjet_sdmass"] = genjet->SoftDroppedP4[0].M();
+        floatVars["genjet_tau1"] = genjet->Tau[0];
+        floatVars["genjet_tau2"] = genjet->Tau[1];
+        floatVars["genjet_tau3"] = genjet->Tau[2];
+        floatVars["genjet_tau4"] = genjet->Tau[3];
+
+        std::vector<ParticleInfo> genparticles;
+        std::vector<int> genparticle_indices;
+        for (Int_t j = 0; j < genjet->Constituents.GetEntriesFast(); ++j) {
+          const TObject *object = genjet->Constituents.At(j);
+          if (!object || object->IsA() != GenParticle::Class())
+            continue;
+          genparticles.emplace_back((GenParticle *)object);
+          const auto &p = genparticles.back();
+          if (std::abs(p.pz) > 10000 || std::abs(p.eta) > 5 || p.pt <= 0) {
+            genparticles.pop_back();
+          } else {
+            genparticle_indices.push_back(genGraph.index((GenParticle *)object));
+          }
+        }
+
+        // sort by pt, keeping the Particle-branch index aligned
+        std::vector<size_t> order(genparticles.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return genparticles[a].pt > genparticles[b].pt; });
+        {
+          std::vector<ParticleInfo> sorted_particles;
+          std::vector<int> sorted_indices;
+          for (size_t k : order) {
+            sorted_particles.push_back(genparticles[k]);
+            sorted_indices.push_back(genparticle_indices[k]);
+          }
+          genparticles = std::move(sorted_particles);
+          genparticle_indices = std::move(sorted_indices);
+        }
+        floatVars["genjet_nparticles"] = genparticles.size();
+        for (const auto &p : genparticles) {
+          arrayVars["genjet_part_px"].push_back(p.px);
+          arrayVars["genjet_part_py"].push_back(p.py);
+          arrayVars["genjet_part_pz"].push_back(p.pz);
+          arrayVars["genjet_part_energy"].push_back(p.energy);
+          arrayVars["genjet_part_pt"].push_back(p.pt);
+          arrayVars["genjet_part_deta"].push_back((jet->Eta > 0 ? 1 : -1) * (p.eta - jet->Eta));
+          arrayVars["genjet_part_dphi"].push_back(deltaPhi(p.phi, jet->Phi));
+          arrayVars["genjet_part_charge"].push_back(p.charge);
+          arrayVars["genjet_part_pid"].push_back(p.pid);
+        }
+
+        // generator history of the constituents
+        auto hist = genGraph.ancestry(genparticle_indices);
+        auto signal = genGraph.signalFlags(label.second ? genGraph.index(label.second) : -1);
+        std::unordered_map<int, int> local;
+        std::unordered_map<int, int> localVertex;
+        for (size_t k = 0; k < hist.size(); ++k) {
+          local[hist[k]] = k;
+          const auto *gp = genGraph.particle(hist[k]);
+          arrayVars["genjet_hist_pt"].push_back(gp->PT);
+          arrayVars["genjet_hist_eta"].push_back(gp->Eta);
+          arrayVars["genjet_hist_phi"].push_back(gp->Phi);
+          arrayVars["genjet_hist_mass"].push_back(gp->P4().M());  // not gp->Mass, see ParticleInfo
+          arrayVars["genjet_hist_energy"].push_back(gp->E);
+          intArrayVars["genjet_hist_pid"].push_back(gp->PID);
+          intArrayVars["genjet_hist_status"].push_back(gp->Status);
+          intArrayVars["genjet_hist_charge"].push_back(gp->Charge);
+          intArrayVars["genjet_hist_index"].push_back(hist[k]);
+          intArrayVars["genjet_hist_statusflags"].push_back(genGraph.statusFlags(hist[k]));
+          auto sig = signal.find(hist[k]);
+          intArrayVars["genjet_hist_levelflags"].push_back(genGraph.levelFlags(hist[k]) |
+                                                           (sig == signal.end() ? 0u : sig->second));
+          int v = genGraph.vertex(hist[k]);
+          int vlocal = -1;
+          if (v >= 0) {
+            vlocal = localVertex.emplace(v, localVertex.size()).first->second;
+          }
+          intArrayVars["genjet_hist_vtx"].push_back(vlocal);
+          intArrayVars["genjet_hist_vtxreason"].push_back(genGraph.vertexReason(v));
+        }
+        for (size_t k = 0; k < hist.size(); ++k) {
+          for (int m : genGraph.parents(hist[k])) {
+            intArrayVars["genjet_hist_edge_mother"].push_back(local.at(m));
+            intArrayVars["genjet_hist_edge_daughter"].push_back(k);
+          }
+        }
+        for (int idx : genparticle_indices) {
+          auto it = local.find(idx);
+          intArrayVars["genjet_part_histidx"].push_back(it == local.end() ? -1 : it->second);
+        }
+        floatVars["genjet_nhist"] = hist.size();
+      }
+
       tree->Fill();
       ++num_processed;
     }
@@ -936,6 +1981,12 @@ void makeNtuples(TString inputFile, TString outputFile, TString jetBranch = "Fat
 
   tree->Write();
   std::cerr << TString::Format("** Written %d jets to output %s", num_processed, outputFile.Data()) << std::endl;
+  if (genGraph.eventsWithCycles() > 0) {
+    std::cerr << TString::Format("** Generator record not a DAG in %ld events: dropped %ld cyclic mother links",
+                                 genGraph.eventsWithCycles(),
+                                 genGraph.droppedCycleLinks())
+              << std::endl;
+  }
 
   delete treeReader;
   delete chain;

@@ -2,6 +2,9 @@
 //   * exactly PER_FILE (100k) jets per output file
 //   * official 41-branch schema (one-hot label_*, one-hot part_isX, scalar aux_genpart_*,
 //     aux_truth_match); drops gen_match / part_pid / part_pt (not in official)
+//   * plus, unless gentruth=false, the gen-level truth of makeNtuples.C copied through unchanged:
+//     genjet_* (matched GenFatJet), genjet_part_* (its constituents), genjet_hist_* (their truth graph).
+//     Input ntuples without these branches are rebinned in the official schema only.
 //   * official file split + naming: CLASS_000..099 -> train_100M, 100..119 -> test_20M,
 //     120..124 -> val_5M  (so it drops in as a Sherpa/ sibling of Pythia/)
 //
@@ -24,7 +27,8 @@ void rebin(TString cls, TString indir, TString outdir,
            TString pat="_*_b*",      // input glob: Sherpa "_*_b*", Herwig "_*"
            int minparts=0,           // drop jets with jet_nparticles < minparts (e.g. 2 -> no single-particle jets)
            float ptmax=0,            // drop jets with jet_pt > ptmax (e.g. 1000 to match JetClass cap); 0 = off
-           int genmatch=0) {         // keep ONLY jets with gen_match==genmatch (e.g. 46 for unified HToWW->2q1l); 0 = off
+           int genmatch=0,           // keep ONLY jets with gen_match==genmatch (e.g. 46 for unified HToWW->2q1l); 0 = off
+           bool gentruth=true) {     // copy the genjet_* gen-truth branches through (see header)
   // class -> index in the official one-hot label vector
   std::map<TString,int> LAB = {
     {"ZJetsToNuNu",0},{"HToBB",1},{"HToCC",2},{"HToGG",3},{"HToWW4Q",4},
@@ -59,12 +63,39 @@ void rebin(TString cls, TString indir, TString outdir,
   TTreeReaderValue<float> in_geta(R,"genpart_eta"), in_gphi(R,"genpart_phi"),
                           in_gpid(R,"genpart_pid"), in_gpt(R,"genpart_pt"), in_sig(R,"is_signal");
   TTreeReaderValue<float> in_gm(R,"gen_match");   // hqu gen-match code (float); used by genmatch filter
+  // gen-level truth, by type as makeNtuples.C writes it
+  const std::vector<const char*> GS={"genjet_matched","genjet_dr","genjet_pt","genjet_eta","genjet_phi",
+                                     "genjet_energy","genjet_nparticles","genjet_sdmass","genjet_tau1",
+                                     "genjet_tau2","genjet_tau3","genjet_tau4","genjet_nhist"};
+  const std::vector<const char*> GF={"genjet_part_px","genjet_part_py","genjet_part_pz","genjet_part_energy",
+                                     "genjet_part_pt","genjet_part_deta","genjet_part_dphi","genjet_part_charge",
+                                     "genjet_part_pid","genjet_hist_pt","genjet_hist_eta","genjet_hist_phi",
+                                     "genjet_hist_mass","genjet_hist_energy"};
+  const std::vector<const char*> GI={"genjet_part_histidx","genjet_hist_pid","genjet_hist_status",
+                                     "genjet_hist_charge","genjet_hist_index","genjet_hist_statusflags",
+                                     "genjet_hist_levelflags","genjet_hist_vtx","genjet_hist_vtxreason",
+                                     "genjet_hist_edge_mother","genjet_hist_edge_daughter"};
+  if (gentruth && !ch.GetBranch("genjet_nhist")) {
+    printf("[rebin %s] input has no gen-truth branches -> official schema only\n", cls.Data());
+    gentruth = false;
+  }
+  std::vector<TTreeReaderValue<float>*> in_gs;
+  std::vector<TTreeReaderArray<float>*> in_gf;
+  std::vector<TTreeReaderArray<int>*> in_gi;
+  if (gentruth) {
+    for (auto n : GS) in_gs.push_back(new TTreeReaderValue<float>(R, n));
+    for (auto n : GF) in_gf.push_back(new TTreeReaderArray<float>(R, n));
+    for (auto n : GI) in_gi.push_back(new TTreeReaderArray<int>(R, n));
+  }
 
   // output buffers
   std::vector<float> o_pk[11];                 // copied kinematics
   std::vector<int>   o_is[5];                  // isChargedHadron,isNeutralHadron,isPhoton,isElectron,isMuon
   int    o_label[10];
   float  o_jet[10], o_aux[4], o_match;
+  std::vector<float> o_gs(GS.size());
+  std::vector<std::vector<float>> o_gf(GF.size());
+  std::vector<std::vector<int>> o_gi(GI.size());
 
   TFile* fout=nullptr; TTree* tout=nullptr;
   Long64_t in_file=0; int chunk=-1;
@@ -81,6 +112,11 @@ void rebin(TString cls, TString indir, TString outdir,
     const char* AUX[4]={"aux_genpart_eta","aux_genpart_phi","aux_genpart_pid","aux_genpart_pt"};
     for(int i=0;i<4;i++) tout->Branch(AUX[i], &o_aux[i], Form("%s/F",AUX[i]));
     tout->Branch("aux_truth_match", &o_match, "aux_truth_match/F");
+    if (gentruth) {
+      for (size_t i=0;i<GS.size();i++) tout->Branch(GS[i], &o_gs[i], Form("%s/F",GS[i]));
+      for (size_t i=0;i<GF.size();i++) tout->Branch(GF[i], &o_gf[i]);
+      for (size_t i=0;i<GI.size();i++) tout->Branch(GI[i], &o_gi[i]);
+    }
   };
   auto close_chunk=[&](){ if(fout){ fout->cd(); tout->Write(); fout->Close(); delete fout; fout=nullptr; tout=nullptr; } };
 
@@ -113,6 +149,11 @@ void rebin(TString cls, TString indir, TString outdir,
     for(int i=0;i<10;i++) o_jet[i]= *(*in_jk[i]);
     o_aux[0]=*in_geta; o_aux[1]=*in_gphi; o_aux[2]=*in_gpid; o_aux[3]=*in_gpt;
     o_match=*in_sig;
+    if (gentruth) {
+      for (size_t i=0;i<GS.size();i++) o_gs[i] = *(*in_gs[i]);
+      for (size_t i=0;i<GF.size();i++) o_gf[i].assign(in_gf[i]->begin(), in_gf[i]->end());
+      for (size_t i=0;i<GI.size();i++) o_gi[i].assign(in_gi[i]->begin(), in_gi[i]->end());
+    }
     tout->Fill(); written++;
     if (written % 500000 == 0) printf("[rebin %s] %lld jets -> file %d\n", cls.Data(), written, chunk);
   }

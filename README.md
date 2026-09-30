@@ -23,7 +23,10 @@ swaps (Sherpa, Herwig) and shower-only swaps holding the ME + hadronisation fixe
   official 125-file JetClass layout), `compare.C` (feature-distribution KS), `verify.C` (integrity),
   and [`tools/ntuplize/`](tools/ntuplize/) — the canonical **exact-JetClass** Delphes card
   (`delphes_card.tcl`) + `makeNtuples.C` (Huilin Qu's ntuplizer). All editions produce identical
-  detector-level jets; only the upstream physics differs.
+  detector-level jets; only the upstream physics differs. The ntuplizer (and its `herwig73/` copy)
+  also writes gen-level truth and gives charged hadrons the pion mass, as CMS particle flow does;
+  `chargedHadronPionMass=false` restores the official JetClass `part_*` features. See
+  [`tools/ntuplize/README.md`](tools/ntuplize/README.md).
 
 ## Docs
 
